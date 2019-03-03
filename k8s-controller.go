@@ -1,4 +1,4 @@
-package main
+package main // import "github.com/ziwon/k8s-controller"
 
 import (
 	"flag"
@@ -42,7 +42,9 @@ func main() {
 	client := kubernetes.NewForConfigOrDie(config)
 
 	sharedInformers := informers.NewSharedInformerFactory(client, 10*time.Minute)
-	k8sController := NewK8SController(client, sharedInformers.Core().V1().Pods())
+	k8sController := NewK8SController(client,
+		sharedInformers.Core().V1().Secrets(),
+		sharedInformers.Core().V1().Namespaces())
 
 	sharedInformers.Start(nil)
 	k8sController.Run(nil)

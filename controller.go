@@ -1,8 +1,10 @@
-package main // import "github.com/ziwon/ziwon-k8s-controller"
+package main
 
 import (
 	"log"
 
+	apicorev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/runtime"
 	informercorev1 "k8s.io/client-go/informers/core/v1"
 	"k8s.io/client-go/kubernetes"
@@ -11,22 +13,41 @@ import (
 	"k8s.io/client-go/tools/cache"
 )
 
-// K&SController defines an example controller struct for watching the changes with Pod
+const (
+	secretSyncType            = "k8s.ziwon.dev/secretsync"
+	secretSyncSourceNamespace = "secretsync"
+)
+
+var namespaceBlacklist = map[string]bool{
+	"kube-public":             true,
+	"kube-system":             true,
+	secretSyncSourceNamespace: true,
+}
+
+// K&SController defines an example controller struct for watching the changes with Secrets
 type K8SController struct {
-	podGetter       corev1.PodsGetter
-	podLister       listercorev1.PodLister
-	podListerSynced cache.InformerSynced
+	secretGetter          corev1.SecretsGetter
+	secretLister          listercorev1.SecretLister
+	secretListerSynced    cache.InformerSynced
+	namespaceGetter       corev1.NamespacesGetter
+	namespaceLister       listercorev1.NamespaceLister
+	namespaceListerSynced cache.InformerSynced
 }
 
 // NewK8SController constructs a new instance of K8SController
-func NewK8SController(client *kubernetes.Clientset, podInformer informercorev1.PodInformer) *K8SController {
+func NewK8SController(client *kubernetes.Clientset,
+	secretInformer informercorev1.SecretInformer,
+	namespaceInformer informercorev1.NamespaceInformer) *K8SController {
 	c := &K8SController{
-		podGetter:       client.CoreV1(),
-		podLister:       podInformer.Lister(),
-		podListerSynced: podInformer.Informer().HasSynced,
+		secretGetter:          client.CoreV1(),
+		secretLister:          secretInformer.Lister(),
+		secretListerSynced:    secretInformer.Informer().HasSynced,
+		namespaceGetter:       client.CoreV1(),
+		namespaceLister:       namespaceInformer.Lister(),
+		namespaceListerSynced: namespaceInformer.Informer().HasSynced,
 	}
 
-	podInformer.Informer().AddEventHandler(
+	secretInformer.Informer().AddEventHandler(
 		cache.ResourceEventHandlerFuncs{
 			AddFunc: func(obj interface{}) {
 				c.onAdd(obj)
@@ -45,7 +66,7 @@ func NewK8SController(client *kubernetes.Clientset, podInformer informercorev1.P
 
 func (c *K8SController) Run(stop <-chan struct{}) {
 	log.Print("waiting for cache sync")
-	if !cache.WaitForCacheSync(stop, c.podListerSynced) {
+	if !cache.WaitForCacheSync(stop, c.secretListerSynced) {
 		log.Print("timed out waiting for cache sync")
 		return
 	}
@@ -64,15 +85,17 @@ func (c *K8SController) onAdd(obj interface{}) {
 		runtime.HandleError(err)
 	}
 	log.Printf("onAdd: %v", key)
+	c.handleSecretChange(obj)
 }
 
-func (c *K8SController) onUpdate(oldObj, _ interface{}) {
+func (c *K8SController) onUpdate(oldObj, newObj interface{}) {
 	key, err := cache.MetaNamespaceKeyFunc(oldObj)
 	if err != nil {
 		log.Printf("onUpdate: error getting key for %#v: %v", oldObj, err)
 		runtime.HandleError(err)
 	}
 	log.Printf("onUpdate: %v", key)
+	c.handleSecretChange(newObj)
 }
 
 func (c *K8SController) onDelete(obj interface{}) {
@@ -81,4 +104,50 @@ func (c *K8SController) onDelete(obj interface{}) {
 		runtime.HandleError(err)
 	}
 	log.Printf("onDelete: %v", key)
+	c.handleSecretChange(obj)
+}
+
+func (c *K8SController) handleSecretChange(obj interface{}) {
+	secret, ok := obj.(*apicorev1.Secret)
+	if !ok {
+		// TODO: this is probably a `DeletedFinalStateUnknown`.  Figure out what
+		// to do.
+		return
+	}
+
+	if secret.ObjectMeta.Namespace != secretSyncSourceNamespace {
+		log.Printf("Skipping secret in wrong namespace")
+		return
+	}
+
+	if secret.Type != secretSyncType {
+		log.Printf("Skipping secret of wrong type")
+		return
+	}
+
+	log.Printf("Do something with this secret")
+	nsList, err := c.namespaceGetter.Namespaces().List(metav1.ListOptions{})
+
+	if err != nil {
+		log.Printf("Error listeing namespaces: %v", err)
+		return
+	}
+
+	for _, ns := range nsList.Items {
+		nsName := ns.ObjectMeta.Name
+		if _, ok := namespaceBlacklist[nsName]; ok {
+			log.Printf("Skipping namespace on blacklist: %v", nsName)
+			continue
+		}
+		log.Printf("We should copy %s to namespace %s", secret.ObjectMeta.Name, ns.ObjectMeta.Name)
+		c.copySecretToNamespace(secret, nsName)
+	}
+}
+
+func (c *K8SController) copySecretToNamespace(secret *apicorev1.Secret, nsName string) {
+	// TODO:
+	// 1. Make a deep copy of the secret
+	// 2. Remove things like object version that'll prevent us from writing
+	// 3. Write in new namespace
+	// 4. Do a create or update for the new object
 }
